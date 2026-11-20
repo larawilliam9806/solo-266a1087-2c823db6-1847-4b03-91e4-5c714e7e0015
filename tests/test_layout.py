@@ -324,5 +324,79 @@ class CsvParseTests(unittest.TestCase):
             parse_csv(csv_bytes("框号,x1,y1,x2,y2\n1,1,2,3,4\n"))
 
 
+class SearchEntryTests(unittest.TestCase):
+    def setUp(self):
+        self.grid = layout.Grid(H, V)
+
+    def test_cell_entry_concatenates_in_reading_order(self):
+        # Two boxes in cell (0,0): box 2 sits one visual line above box 1,
+        # so its text comes first regardless of box id order.
+        boxes = [
+            make_box(1, "1", "下", 10, 30, 40, 45),
+            make_box(2, "2", "上", 10, 10, 40, 25),
+        ]
+        entries = layout.search_entries(layout.evaluate(self.grid, boxes, {}))
+        self.assertEqual(len(entries), 1)
+        entry = entries[0]
+        self.assertEqual(entry["kind"], "cell")
+        self.assertEqual(entry["text"], "上下")
+        self.assertEqual(entry["box_ids"], [2, 1])
+        self.assertEqual(entry["spans"], [[0, 1], [1, 2]])
+        self.assertEqual((entry["row"], entry["col"], entry["column"]), (0, 0, "name"))
+        self.assertIsNone(entry["status"])
+
+    def test_unresolved_boxes_are_single_entries(self):
+        entries = layout.search_entries(layout.evaluate(self.grid, sample_boxes(), {}))
+        by_key = {entry["entry_key"]: entry for entry in entries}
+        self.assertEqual(by_key["box:5"]["kind"], "box")
+        self.assertEqual(by_key["box:5"]["status"], "pending")
+        self.assertEqual(by_key["box:5"]["text"], "跨格")
+        self.assertEqual(by_key["box:5"]["spans"], [[0, 2]])
+        self.assertEqual(by_key["box:6"]["text"], "出界")
+        # Placed boxes never produce single-box entries.
+        self.assertNotIn("box:1", by_key)
+
+    def test_excluded_box_keeps_single_entry(self):
+        decisions = {5: {"kind": "exclude", "target_cell": "",
+                         "overlap_cells": self.grid.overlapping_keys((90, 10, 110, 40))}}
+        evaluated = layout.evaluate(self.grid, sample_boxes(), decisions)
+        by_key = {entry["entry_key"]: entry
+                  for entry in layout.search_entries(evaluated)}
+        self.assertEqual(by_key["box:5"]["status"], "excluded")
+
+    def test_empty_units_are_skipped(self):
+        boxes = [make_box(1, "1", "", 10, 10, 40, 25),
+                 make_box(2, "2", "  ", 400, 400, 450, 430)]
+        entries = layout.search_entries(layout.evaluate(self.grid, boxes, {}))
+        self.assertEqual(entries, [])
+
+    def test_entries_are_deterministically_ordered(self):
+        entries = layout.search_entries(layout.evaluate(self.grid, sample_boxes(), {}))
+        kinds = [entry["kind"] for entry in entries]
+        # Cells come first (row-major), then the single-box entries.
+        self.assertEqual(kinds, ["cell"] * kinds.count("cell") +
+                         ["box"] * kinds.count("box"))
+        cells = [entry for entry in entries if entry["kind"] == "cell"]
+        self.assertEqual([(e["row"], e["col"]) for e in cells],
+                         sorted((e["row"], e["col"]) for e in cells))
+
+
+class FindMatchTests(unittest.TestCase):
+    def test_reports_every_occurrence_including_overlaps(self):
+        self.assertEqual(layout.find_matches("aaa", "aa"), [0, 1])
+        self.assertEqual(layout.find_matches("abcabc", "abc"), [0, 3])
+
+    def test_no_match_and_empty_query(self):
+        self.assertEqual(layout.find_matches("abc", "d"), [])
+        self.assertEqual(layout.find_matches("abc", ""), [])
+
+    def test_match_boxes_maps_span_overlap(self):
+        spans = [[0, 2], [2, 4], [4, 4]]  # third box contributed no text
+        self.assertEqual(layout.match_boxes(spans, [1, 2, 3], 1, 3), [1, 2])
+        self.assertEqual(layout.match_boxes(spans, [1, 2, 3], 0, 2), [1])
+        self.assertEqual(layout.match_boxes(spans, [1, 2, 3], 2, 4), [2])
+        self.assertEqual(layout.match_boxes(spans, [1, 2, 3], 4, 4), [])
+
+
 if __name__ == "__main__":
     unittest.main()

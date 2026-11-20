@@ -55,6 +55,13 @@ h2 { font-size: 18px; }
 .upload { display: flex; gap: 12px; flex-wrap: wrap; margin: 16px 0 8px; }
 .upload input[type=file] { flex: 1 1 320px; padding: 8px; border: 1px dashed var(--line); border-radius: 8px; background: #fff; }
 
+.search { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0 8px; }
+.search input[type=search] { flex: 1 1 320px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 7px; background: #fff; font: inherit; }
+
+.hits td.context { white-space: pre-wrap; word-break: break-all; }
+.hits td.nowrap { white-space: nowrap; }
+.hits mark { background: #fde68a; border-radius: 2px; padding: 0 1px; }
+
 button, .button {
   display: inline-flex;
   align-items: center;
@@ -88,6 +95,7 @@ button.danger.ghost { background: transparent; }
 .notice { padding: 10px 12px; border-radius: 8px; font-size: 14px; }
 .notice.warn { background: #fbf0d9; color: #7a5200; }
 .notice.bad { background: #f9e1de; color: #8a2a1c; }
+.notice.info { background: #e3eefb; color: #1f5f8b; }
 .error { color: var(--pending); font-size: 14px; }
 
 .statusline { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
@@ -137,6 +145,8 @@ th { color: var(--muted); font-weight: 600; }
 
 .box-rect { cursor: pointer; }
 .box-rect.sel { stroke-width: 3; }
+.box.hit .box-rect { stroke: #d97706; stroke-width: 3.5; fill-opacity: 0.42; }
+.box.hit .box-label { font-weight: 700; }
 .box-label { font-size: 11px; pointer-events: none; fill: #241f18; }
 .grid-line { stroke: #9a6b3f; stroke-width: 1; stroke-dasharray: none; pointer-events: none; }
 .grid-line.dragging { stroke: #b3261e; stroke-width: 2.4; }

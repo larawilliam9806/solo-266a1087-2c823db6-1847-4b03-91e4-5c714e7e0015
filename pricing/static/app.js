@@ -38,6 +38,10 @@
   let selectedId = null;
   let bounds = { minX: 0, minY: 0, maxX: 1, maxY: 1 };
   let dragging = null;
+  let hitBoxIds = {};               // box_id -> true for search-hit highlight
+
+  const searchParams = new URLSearchParams(window.location.search);
+  let searchQuery = (searchParams.get("q") || "").trim();
 
   // ---------------------------------------------------------------- helpers
   function el(name, attrs) {
@@ -156,7 +160,7 @@
       const selected = box.box_id === selectedId;
       const group = el("g", {
         "data-box-id": box.box_id,
-        class: "box" + (selected ? " sel" : ""),
+        class: "box" + (selected ? " sel" : "") + (hitBoxIds[box.box_id] ? " hit" : ""),
       });
       group.appendChild(el("rect", {
         x: box.x1, y: box.y1,
@@ -418,6 +422,82 @@
     render();
     renderInspector();
     updatePreview();
+    loadSearchHits();
+  }
+
+  // ------------------------------------------------------------- search hits
+  // The page was opened from the search results (?q=...&entry=...&offset=...):
+  // re-validate that hit against the job's current index and highlight the
+  // boxes that take part in it.  A hit that no longer exists has been
+  // invalidated by a task change, so the user is asked to search again.
+  function searchNotice() {
+    return document.getElementById("search-notice");
+  }
+
+  function showSearchNotice(message, isStale) {
+    const notice = searchNotice();
+    if (!notice) return;
+    notice.hidden = false;
+    notice.className = "notice " + (isStale ? "bad" : "info");
+    notice.innerHTML = "";
+    notice.appendChild(document.createTextNode(message + " "));
+    const again = document.createElement("a");
+    again.href = "/search?q=" + encodeURIComponent(searchQuery);
+    again.textContent = "重新搜索";
+    notice.appendChild(again);
+    if (!isStale) {
+      notice.appendChild(document.createTextNode(" "));
+      const clear = document.createElement("a");
+      clear.href = "#";
+      clear.textContent = "清除高亮";
+      clear.addEventListener("click", function (event) {
+        event.preventDefault();
+        hitBoxIds = {};
+        searchQuery = "";  // stop re-validating on later state changes
+        notice.hidden = true;
+        try {
+          window.history.replaceState(null, "", "/jobs/" + jobId);
+        } catch (e) { /* ignore */ }
+        render();
+      });
+      notice.appendChild(clear);
+    }
+  }
+
+  function loadSearchHits() {
+    if (!searchQuery || !searchNotice()) return;
+    request("/api/jobs/" + jobId + "/hits?q=" + encodeURIComponent(searchQuery))
+      .then(function (data) {
+        const hits = data.hits || [];
+        const entryKey = searchParams.get("entry");
+        const offsetParam = searchParams.get("offset");
+        hitBoxIds = {};
+        if (entryKey !== null && offsetParam !== null) {
+          const offset = Number(offsetParam);
+          const target = hits.find(function (hit) {
+            return hit.entry_key === entryKey && hit.offset === offset;
+          });
+          if (!target) {
+            showSearchNotice(
+              "“" + searchQuery + "”的这处命中已失效（任务已更新），请", true);
+            render();
+            return;
+          }
+          target.box_ids.forEach(function (id) { hitBoxIds[id] = true; });
+          showSearchNotice(
+            "“" + searchQuery + "”：本处命中涉及 " + target.box_ids.length +
+            " 个文字框，已高亮。", false);
+        } else {
+          hits.forEach(function (hit) {
+            hit.box_ids.forEach(function (id) { hitBoxIds[id] = true; });
+          });
+          showSearchNotice(
+            "“" + searchQuery + "”在本任务共 " + hits.length +
+            " 处命中，参与匹配的文字框已高亮。", false);
+        }
+        render();
+      })
+      .catch(function () { /* a failed lookup must not break editing */ });
   }
 
   function updatePreview() {

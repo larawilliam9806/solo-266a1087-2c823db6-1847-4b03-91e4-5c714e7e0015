@@ -16,6 +16,13 @@
   原来保存的布局与归位结果保持不变。
 - **导出**：没有待核框且格线有效时才可下载。同格内的文字按**从上到下**、
   同一高度内**从左到右**拼接。输出 UTF-8 BOM 的 `品名,规格,批发价` CSV。
+- **查找错字**：首页或 `/search` 输入 OCR 认错的字或词组，即可查出它在所有
+  录入任务里的每一处位置。同一格内的文字按上述拼接顺序匹配——可跨文字框，
+  不跨格；待核、待重新确认和已排除的框按单框匹配。结果列出任务、行列或
+  未归位状态，点“打开并高亮”进入编辑页，参与匹配的文字框会以橙色描边标出；
+  若该处命中已因任务更新而失效，页面会提示重新搜索。搜索只查预建索引，
+  不会逐页重算归位；上传、改格线、归位、排除、撤销决定、删除任务时索引与
+  任务数据在同一事务里生效，更新失败则原任务和旧命中都保留。
 
 ## 本地运行
 
@@ -64,7 +71,7 @@ docker compose up --build
 ## 测试
 
 ```bash
-# 逻辑与接口测试（60 个）
+# 逻辑与接口测试（95 个）
 python3 -m unittest discover -s tests
 
 # 页面交互测试（jsdom，需先启动服务；会自行上传样例并断言归位与导出）
@@ -75,6 +82,7 @@ create_app({'DATABASE':'/tmp/ui.sqlite3'}).run(port=5057)"
 npm install jsdom
 node tests/ui_smoke.js http://127.0.0.1:5057
 node tests/ui_lines.js http://127.0.0.1:5057
+node tests/ui_search.js http://127.0.0.1:5057
 ```
 
 `sample/` 内有两份可直接上传的示例 OCR CSV。
@@ -83,13 +91,13 @@ node tests/ui_lines.js http://127.0.0.1:5057
 
 ```
 pricing/
-  app.py        Flask 路由、状态组装、JSON API、导出
-  layout.py     纯逻辑：格线网格、归位判定、决定有效性、阅读顺序、行拼接
+  app.py        Flask 路由、状态组装、JSON API、导出、跨任务搜索
+  layout.py     纯逻辑：格线网格、归位判定、决定有效性、阅读顺序、行拼接、搜索索引构建
   csvparse.py   OCR CSV 解析（多表头/多编码/单列坐标）
-  db.py         SQLite 读写
-  schema.sql    表结构
-  templates/    任务列表 / 编辑页 / 错误页
-  static/       页面样式与前端交互（SVG 画框、拖拽格线、归位操作）
+  db.py         SQLite 读写（任务数据与搜索索引同事务提交）
+  schema.sql    表结构（含 search_entries 搜索索引表）
+  templates/    任务列表 / 编辑页 / 搜索页 / 错误页
+  static/       页面样式与前端交互（SVG 画框、拖拽格线、归位操作、命中高亮）
 sample/         示例 OCR CSV
 tests/          Python 单元/集成测试 + jsdom 页面测试
 ```

@@ -3,11 +3,17 @@
 Upload one page of OCR CSV, draw/confirm the ruling lines that split the page
 into 品名 / 规格 / 批发价 columns, resolve every box that does not sit wholly
 inside a single cell, then download the three-column CSV.
+
+A search index over every task's text lets operators find where an OCR
+misreading appears across all jobs.  The index is rebuilt inside the same
+transaction as each task change, so a failed update keeps both the old task
+data and the old hits.
 """
 
 from __future__ import annotations
 
 import csv
+import contextlib
 import io
 import os
 from pathlib import Path
@@ -31,6 +37,75 @@ from . import layout
 from .csvparse import CsvError, parse_csv
 
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+CONTEXT_CHARS = 12
+
+
+def _evaluate_boxes(boxes, horizontal, vertical, decisions):
+    """Placement status for every box, or all-pending when lines are invalid."""
+    if len(vertical) == 4 and len(horizontal) >= 2:
+        grid = layout.Grid(horizontal, vertical)
+        return layout.evaluate(grid, boxes, decisions)
+    return [
+        {
+            "box_id": box["id"], "box_ref": box["box_ref"],
+            "text": (box["text"] or "").strip(),
+            "x1": box["x1"], "y1": box["y1"],
+            "x2": box["x2"], "y2": box["y2"],
+            "status": "pending", "status_label": "待划格线",
+            "row": None, "col": None, "column": None,
+            "cell_key": "", "candidates": [], "decision": None,
+            "manual": False, "note": "格线无效，暂不归位",
+        }
+        for box in boxes
+    ]
+
+
+def _rebuild_job_index(connection, job_id):
+    """Recompute one job's search index inside the caller's transaction."""
+    boxes = db.get_boxes(connection, job_id)
+    horizontal, vertical = db.get_lines(connection, job_id)
+    decisions = db.get_decisions(connection, job_id)
+    evaluated = _evaluate_boxes(boxes, horizontal, vertical, decisions)
+    db.rebuild_search_index(connection, job_id, layout.search_entries(evaluated))
+
+
+def _search_hits(connection, query, job_id=None):
+    """Find every occurrence of query in the pre-built index.
+
+    Only the index table is read here: placement is never recomputed per
+    page at search time.
+    """
+    hits = []
+    for entry in db.get_search_entries(connection, job_id):
+        text = entry["text"]
+        for offset in layout.find_matches(text, query):
+            box_ids = layout.match_boxes(
+                entry["spans"], entry["box_ids"], offset, offset + len(query))
+            hits.append({
+                "job_id": entry["job_id"],
+                "filename": entry["filename"],
+                "entry_key": entry["entry_key"],
+                "kind": entry["kind"],
+                "row": entry["row_idx"],
+                "col": entry["col_idx"],
+                "column": entry["column_key"],
+                "column_label": layout.COLUMN_LABELS.get(entry["column_key"] or "", ""),
+                "status": entry["status"],
+                "status_label": layout.STATUS_LABELS.get(entry["status"] or "", ""),
+                "offset": offset,
+                "box_ids": box_ids,
+                "before": text[max(0, offset - CONTEXT_CHARS):offset],
+                "match": text[offset:offset + len(query)],
+                "after": text[offset + len(query):offset + len(query) + CONTEXT_CHARS],
+            })
+    hits.sort(key=lambda hit: (
+        hit["job_id"],
+        hit["kind"] != "cell",
+        hit["row"] if hit["row"] is not None else 0,
+        hit["col"] if hit["col"] is not None else 0,
+        hit["offset"],
+    ))
+    return hits
 
 
 def create_app(config=None):
@@ -47,6 +122,17 @@ def create_app(config=None):
     if database != ":memory:":
         Path(database).expanduser().parent.mkdir(parents=True, exist_ok=True)
     db.init_db(database)
+
+    # Jobs saved before the search index existed (or left over from a
+    # crashed run) get their index built once at startup, so existing tasks
+    # are searchable without re-uploading.
+    connection = db.connect(database)
+    try:
+        for job_id in db.jobs_missing_index(connection):
+            _rebuild_job_index(connection, job_id)
+        connection.commit()
+    finally:
+        connection.close()
 
     # ------------------------------------------------------------------
     # Per-request connection
@@ -68,6 +154,23 @@ def create_app(config=None):
             abort(404)
         return job
 
+    @contextlib.contextmanager
+    def task_transaction():
+        """One transaction for a task change plus its search-index rebuild.
+
+        Commits only when every step succeeded; any failure rolls both the
+        task data and the index back, so the original task and its old hits
+        survive a failed update.
+        """
+        connection = get_db()
+        try:
+            yield connection
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            app.logger.exception("保存失败，已回滚")
+            raise
+
     # ------------------------------------------------------------------
     # State computation shared by pages and API
     # ------------------------------------------------------------------
@@ -84,25 +187,13 @@ def create_app(config=None):
             invalid = _invalid_message(len(horizontal), len(vertical))
 
         decisions = db.get_decisions(connection, job_id)
+        evaluated = _evaluate_boxes(boxes, horizontal, vertical, decisions)
         if grid is None:
-            evaluated = [
-                {
-                    "box_id": box["id"], "box_ref": box["box_ref"],
-                    "text": box["text"], "x1": box["x1"], "y1": box["y1"],
-                    "x2": box["x2"], "y2": box["y2"],
-                    "status": "pending", "status_label": "待划格线",
-                    "row": None, "col": None, "column": None,
-                    "cell_key": "", "candidates": [], "decision": None,
-                    "manual": False, "note": "格线无效，暂不归位",
-                }
-                for box in boxes
-            ]
             pending = sum(1 for item in evaluated if (item["text"] or "").strip())
             rows = []
             if not invalid:
                 invalid = "尚未确认格线"
         else:
-            evaluated = layout.evaluate(grid, boxes, decisions)
             pending = layout.pending_count(evaluated)
             rows = layout.build_rows(evaluated)
 
@@ -163,11 +254,16 @@ def create_app(config=None):
                 flash(line, "error")
             return redirect(url_for("index"))
 
-        connection = get_db()
-        job_id = db.create_job(connection, filename)
-        db.add_boxes(connection, job_id, parsed.boxes)
-        horizontal, vertical = _suggest_lines(parsed.boxes)
-        db.set_lines(connection, job_id, horizontal, vertical)
+        try:
+            with task_transaction() as connection:
+                job_id = db.create_job(connection, filename)
+                db.add_boxes(connection, job_id, parsed.boxes)
+                horizontal, vertical = _suggest_lines(parsed.boxes)
+                db.set_lines(connection, job_id, horizontal, vertical)
+                _rebuild_job_index(connection, job_id)
+        except Exception:  # noqa: BLE001 - rolled back; nothing was saved
+            flash("保存任务失败，请重试", "error")
+            return redirect(url_for("index"))
         for warning in parsed.warnings[:20]:
             flash(warning, "warning")
         flash(f"已导入 {len(parsed.boxes)} 个文字框，请核对格线", "success")
@@ -184,9 +280,51 @@ def create_app(config=None):
     @app.post("/jobs/<int:job_id>/delete")
     def job_delete(job_id):
         load_job_or_404(job_id)
-        db.delete_job(get_db(), job_id)
+        try:
+            with task_transaction() as connection:
+                # The search index rows cascade away with the job.
+                db.delete_job(connection, job_id)
+        except Exception:  # noqa: BLE001 - rolled back; task kept
+            flash("删除任务失败，请重试", "error")
+            return redirect(url_for("index"))
         flash("已删除该任务", "success")
         return redirect(url_for("index"))
+
+    # ------------------------------------------------------------------
+    # Search across all tasks
+    # ------------------------------------------------------------------
+    @app.get("/search")
+    def search_page():
+        query = (request.args.get("q") or "").strip()
+        hits = _search_hits(get_db(), query) if query else []
+        return render_template("search.html", q=query, hits=hits)
+
+    @app.get("/api/search")
+    def api_search():
+        query = (request.args.get("q") or "").strip()
+        if not query:
+            return jsonify({
+                "ok": False, "error": "请输入要查找的错字或词组", "details": [],
+            }), 400
+        hits = _search_hits(get_db(), query)
+        return jsonify({"ok": True, "q": query, "total": len(hits), "hits": hits})
+
+    @app.get("/api/jobs/<int:job_id>/hits")
+    def api_job_hits(job_id):
+        """Current hits of one query inside one job.
+
+        The job page calls this to highlight the boxes of the hit it was
+        opened with; a hit that no longer exists has been invalidated by a
+        task change and the page asks the user to search again.
+        """
+        load_job_or_404(job_id)
+        query = (request.args.get("q") or "").strip()
+        if not query:
+            return jsonify({
+                "ok": False, "error": "请输入要查找的错字或词组", "details": [],
+            }), 400
+        hits = _search_hits(get_db(), query, job_id=job_id)
+        return jsonify({"ok": True, "q": query, "total": len(hits), "hits": hits})
 
     # ------------------------------------------------------------------
     # JSON API
@@ -210,7 +348,16 @@ def create_app(config=None):
                 "error": error.message,
                 "details": error.details,
             }), 400
-        db.set_lines(get_db(), job_id, horizontal, vertical)
+        try:
+            with task_transaction() as connection:
+                db.set_lines(connection, job_id, horizontal, vertical)
+                _rebuild_job_index(connection, job_id)
+        except Exception:  # noqa: BLE001 - rolled back; old layout kept
+            return jsonify({
+                "ok": False,
+                "error": "保存格线失败，已保留原布局与归位结果",
+                "details": [],
+            }), 500
         return jsonify(_json_state(job_state(job_id)))
 
     @app.post("/api/jobs/<int:job_id>/suggest-lines")
@@ -245,14 +392,32 @@ def create_app(config=None):
             )
         except layout.LayoutError as error:
             return jsonify({"ok": False, "error": error.message, "details": error.details}), 400
-        db.set_decision(get_db(), job_id, box["id"], decision["kind"],
-                        decision["target_cell"], decision["overlap_cells"])
+        try:
+            with task_transaction() as connection:
+                db.set_decision(connection, job_id, box["id"], decision["kind"],
+                                decision["target_cell"], decision["overlap_cells"])
+                _rebuild_job_index(connection, job_id)
+        except Exception:  # noqa: BLE001 - rolled back; old decision kept
+            return jsonify({
+                "ok": False,
+                "error": "保存归位决定失败，请重试",
+                "details": [],
+            }), 500
         return jsonify(_json_state(job_state(job_id)))
 
     @app.delete("/api/jobs/<int:job_id>/decisions/<int:box_id>")
     def api_clear_decision(job_id, box_id):
         load_job_or_404(job_id)
-        db.clear_decision(get_db(), job_id, box_id)
+        try:
+            with task_transaction() as connection:
+                db.clear_decision(connection, job_id, box_id)
+                _rebuild_job_index(connection, job_id)
+        except Exception:  # noqa: BLE001 - rolled back; old decision kept
+            return jsonify({
+                "ok": False,
+                "error": "撤销决定失败，请重试",
+                "details": [],
+            }), 500
         return jsonify(_json_state(job_state(job_id)))
 
     # ------------------------------------------------------------------

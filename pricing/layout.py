@@ -422,6 +422,108 @@ def build_rows(evaluated):
 
 
 # ---------------------------------------------------------------------------
+# Search index
+# ---------------------------------------------------------------------------
+
+def search_entries(evaluated):
+    """Build the searchable text units of one job from its evaluated boxes.
+
+    One entry per grid cell that holds placed boxes: the cell text is the
+    concatenation of its boxes in reading order, so a query may span boxes
+    but never spans cells.  Every unresolved box (待核 / 待重新确认 /
+    已排除) becomes a single-box entry matched on its own text only.
+
+    Each entry records the text span of every participating box so a match
+    can be mapped back to the boxes that produced it.  Empty units are
+    skipped: they can never match a non-empty query.
+    """
+    cells = {}
+    cell_order = []
+    box_entries = []
+    for item in evaluated:
+        status = item["status"]
+        if status in ("assigned_auto", "assigned_manual"):
+            key = item["cell_key"]
+            if key not in cells:
+                cells[key] = {
+                    "row": item["row"],
+                    "col": item["col"],
+                    "column": item["column"],
+                    "items": [],
+                }
+                cell_order.append(key)
+            cells[key]["items"].append(item)
+        elif status in ("pending", "stale", "excluded"):
+            text = item["text"] or ""
+            if not text:
+                continue
+            box_entries.append({
+                "entry_key": "box:%d" % item["box_id"],
+                "kind": "box",
+                "row": None,
+                "col": None,
+                "column": None,
+                "status": status,
+                "text": text,
+                "box_ids": [item["box_id"]],
+                "spans": [[0, len(text)]],
+            })
+
+    cell_entries = []
+    for key in cell_order:
+        cell = cells[key]
+        text = ""
+        spans = []
+        box_ids = []
+        for entry in reading_order(cell["items"]):
+            box_ids.append(entry["box_id"])
+            spans.append([len(text), len(text) + len(entry["text"])])
+            text += entry["text"]
+        if not text:
+            continue
+        cell_entries.append({
+            "entry_key": key,
+            "kind": "cell",
+            "row": cell["row"],
+            "col": cell["col"],
+            "column": cell["column"],
+            "status": None,
+            "text": text,
+            "box_ids": box_ids,
+            "spans": spans,
+        })
+
+    cell_entries.sort(key=lambda entry: (entry["row"], entry["col"]))
+    box_entries.sort(key=lambda entry: entry["box_ids"][0])
+    return cell_entries + box_entries
+
+
+def find_matches(text, query):
+    """Start offsets of every occurrence of query in text.
+
+    Overlapping occurrences are all reported (stepping one character after
+    each hit), so "aa" is found twice in "aaa".
+    """
+    if not query:
+        return []
+    offsets = []
+    start = 0
+    while True:
+        index = text.find(query, start)
+        if index < 0:
+            return offsets
+        offsets.append(index)
+        start = index + 1
+
+
+def match_boxes(spans, box_ids, start, end):
+    """Ids of the boxes whose text span intersects the match [start, end)."""
+    return [box_id
+            for (span_start, span_end), box_id in zip(spans, box_ids)
+            if span_start < end and start < span_end]
+
+
+# ---------------------------------------------------------------------------
 # Decision validation
 # ---------------------------------------------------------------------------
 

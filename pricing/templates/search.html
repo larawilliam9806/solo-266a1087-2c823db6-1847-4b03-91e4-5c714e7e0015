@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}查找错字 · 旧报纸价目表录入{% endblock %}
+{% block content %}
+<section class="card">
+  <h1>查找错字</h1>
+  <p class="muted">
+    输入 OCR 认错的字或词组，在所有录入任务里查找它的位置。
+    同一格内的文字按拼接顺序匹配：可跨文字框，不跨格；
+    待核、待重新确认和已排除的框按单框匹配。
+  </p>
+  <form class="search" method="get" action="{{ url_for('search_page') }}">
+    <input type="search" name="q" value="{{ q }}" placeholder="错字或词组，例如：白砂溏" required>
+    <button type="submit" class="primary">查找</button>
+  </form>
+</section>
+
+{% if q %}
+<section class="card">
+  <h2>“{{ q }}”的命中（{{ hits|length }} 处）</h2>
+  {% if hits %}
+  <table class="hits">
+    <thead>
+      <tr><th>任务</th><th>位置</th><th>上下文</th><th></th></tr>
+    </thead>
+    <tbody>
+      {% for hit in hits %}
+      <tr>
+        <td>
+          <a href="{{ url_for('job_view', job_id=hit.job_id) }}">#{{ hit.job_id }}</a>
+          {{ hit.filename }}
+        </td>
+        <td class="nowrap">
+          {% if hit.kind == "cell" %}
+            第 {{ hit.row + 1 }} 行 · {{ hit.column_label }}
+          {% else %}
+            未归位 · {{ hit.status_label }}
+          {% endif %}
+        </td>
+        <td class="context">{{ hit.before }}<mark>{{ hit.match }}</mark>{{ hit.after }}</td>
+        <td class="right">
+          <a class="button"
+             href="{{ url_for('job_view', job_id=hit.job_id) }}?q={{ q|urlencode }}&entry={{ hit.entry_key|urlencode }}&offset={{ hit.offset }}">打开并高亮</a>
+        </td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">没有找到“{{ q }}”。</p>
+  {% endif %}
+</section>
+{% endif %}
+{% endblock %}

@@ -43,3 +43,25 @@ CREATE TABLE IF NOT EXISTS decisions (
     created_at   TEXT    NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
     PRIMARY KEY (job_id, box_id)
 );
+
+-- Search index over every task's searchable text.  A 'cell' entry holds the
+-- concatenated text of the boxes placed in one grid cell (reading order); a
+-- 'box' entry holds one unresolved box (待核/待重新确认/已排除).  `spans` is
+-- the JSON list of [start, end) offsets of each box in `box_ids` within
+-- `text`, so a match can be mapped back to its boxes.  The index is rebuilt
+-- in the same transaction as every task change, so hits never drift from
+-- the task data; a failed update rolls both back together.
+CREATE TABLE IF NOT EXISTS search_entries (
+    job_id      INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+    entry_key   TEXT    NOT NULL,
+    kind        TEXT    NOT NULL CHECK (kind IN ('cell','box')),
+    row_idx     INTEGER,
+    col_idx     INTEGER,
+    column_key  TEXT,
+    status      TEXT,
+    text        TEXT    NOT NULL,
+    box_ids     TEXT    NOT NULL DEFAULT '[]',
+    spans       TEXT    NOT NULL DEFAULT '[]',
+    PRIMARY KEY (job_id, entry_key)
+);
+CREATE INDEX IF NOT EXISTS idx_search_job ON search_entries(job_id);
